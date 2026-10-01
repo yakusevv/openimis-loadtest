@@ -188,7 +188,7 @@ def _thresholds(environment, **_):
         environment.process_exit_code = 1
         return
     reasons = []
-    # Setting process_exit_code overrides Locust's own exit-on-error, so crashed tasks are counted here.
+    # Setting process_exit_code overrides Locust's own exit-on-error, so errors in users are counted here.
     crashes = sum(e["count"] for e in environment.runner.exceptions.values())
     if crashes:
         reasons.append(f"{crashes} errors in simulated users")

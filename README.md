@@ -16,15 +16,14 @@ once, and fail when too many requests fail or when responses get too slow.
 | product list | `products` | 1 |
 
 Each simulated user logs in once, then picks a scenario at random, weighted by its share, every
-1 to 3 seconds. The claims, insurees and health facilities it asks for are read from the target
-when the run starts, so the tests work against any openIMIS instance that has claims.
+1 to 3 seconds. The claims, insurees and health-facility locations it asks for are read from the
+target when the run starts, so the tests work against any openIMIS instance that has claims.
 
 ## Running in GitHub Actions
 
-[openimis-dist_dkr](https://github.com/openimis/openimis-dist_dkr) runs the **Load test** workflow
-every night at 03:00 UTC, by calling it from its own workflow. The run, its results and its
-notifications therefore belong to that repository. To run it yourself, open the Actions tab of
-either repository, choose **Load test** and **Run workflow**.
+To start a run, open the Actions tab, choose **Load test** and **Run workflow**. Another
+repository can also run it from a workflow of its own, as described
+[below](#calling-it-from-another-repository).
 
 Each run starts a complete openIMIS stack from
 [openimis-dist_dkr](https://github.com/openimis/openimis-dist_dkr) with the demo dataset, adds
@@ -42,15 +41,13 @@ once with a single user, and then runs the load. A run takes about 20 minutes.
 | `fail_ratio` | `0.01` | highest share of failed requests that still passes |
 | `p95_ceiling_ms` | `4000` | highest 95th-percentile response time, in ms, that still passes; `0` switches the check off |
 
-The nightly run in openimis-dist_dkr passes `develop` for all three images, the way that
-repository's own end-to-end tests do. The backend image must include `seed_synthetic_health_data`,
-which the claim module ships from release 26.10; with an older image the run stops at the seed step
-and says so.
+The backend image must include `seed_synthetic_health_data`, which the claim module ships from
+release 26.10; with an older image the run stops at the seed step and says so.
 
 ### Calling it from another repository
 
-Another workflow can run the same load test as a job of its own, and the run then shows up in that
-repository. openimis-dist_dkr does this for the nightly run:
+Another workflow can run the same load test as a job of its own. The run, its results and its
+notifications then belong to that repository:
 
 ```yaml
 jobs:
@@ -71,15 +68,15 @@ It takes the inputs listed above, plus three that only a caller needs:
 | `loadtest_repository` | `openimis/openimis-loadtest` | repository holding this workflow |
 | `loadtest_ref` | `main` | branch or tag of `loadtest_repository`; name the same ref as after the `@` in `uses` |
 
-The last two exist because a called workflow cannot see its own repository: GitHub gives it the
-caller's, so it checks out its locustfile from what these inputs name.
+The last two exist because, in a called workflow, GitHub's default checkout is the caller's
+repository; the job checks out its own files from what these two inputs name.
 
 ### Reading the result
 
-The run's summary page shows which images and stack were used, and where each tag came from, the size of the dataset, and the
-response times of every request type. The full results are attached to the run as an artifact: an
-HTML report and CSV and JSON files. When a run fails, the artifact also holds the logs of every
-container in the stack.
+The run's summary page shows the stack and the images used, where each image tag came from, the
+size of the dataset, and the response times of every request type. The full results are attached
+to the run as an artifact: an HTML report and CSV and JSON files. When a run fails, the artifact
+also holds the logs of every container in the stack.
 
 A run fails when:
 
