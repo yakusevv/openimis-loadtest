@@ -21,9 +21,10 @@ when the run starts, so the tests work against any openIMIS instance that has cl
 
 ## Running in GitHub Actions
 
-The **Load test** workflow runs every night at 03:00 UTC. It tests two lines side by side, as two
-jobs of one run: `develop`, and the newest release branch. To run it yourself, open the Actions
-tab, choose **Load test** and **Run workflow**.
+[openimis-dist_dkr](https://github.com/openimis/openimis-dist_dkr) runs the **Load test** workflow
+every night at 03:00 UTC, by calling it from its own workflow. The run, its results and its
+notifications therefore belong to that repository. To run it yourself, open the Actions tab of
+either repository, choose **Load test** and **Run workflow**.
 
 Each run starts a complete openIMIS stack from
 [openimis-dist_dkr](https://github.com/openimis/openimis-dist_dkr) with the demo dataset, adds

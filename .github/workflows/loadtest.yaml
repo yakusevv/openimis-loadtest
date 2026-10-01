@@ -1,8 +1,7 @@
 name: Load test
 
 on:
-  schedule:
-    - cron: "0 3 * * *"
+  # No schedule here: openimis-dist_dkr runs this workflow every night by calling it.
   workflow_dispatch:
     inputs:
       release:
