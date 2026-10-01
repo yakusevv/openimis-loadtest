@@ -75,4 +75,5 @@ stack's logs are added when the run fails.
 
 A manual run can change the image tags, the `openimis-dist_dkr` branch, the seed preset, the load
 profile and both thresholds. A scheduled run uses the defaults: the `26.10` backend and frontend
-images, the `develop` database image and the `medium` preset.
+images, the `develop` database image, the `medium` preset, 20 users for 5 minutes, and a p95
+ceiling of 4 s: three times what that profile measured on a hosted runner.
