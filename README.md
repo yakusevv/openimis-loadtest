@@ -33,23 +33,19 @@ once with a single user, and then runs the load. A run takes about 20 minutes.
 
 | Input | Default | Meaning |
 |---|---|---|
-| `release` | `develop` | openIMIS release to test: `develop`, a release such as `26.10`, or `release-branch` for the newest release branch. Several, separated by commas, run as parallel jobs; `develop,release-branch` repeats the nightly run |
+| `be_tag`, `fe_tag`, `db_tag` | empty | tag of the `openimis-be`, `openimis-fe` and `openimis-pgsql` image to test; empty keeps the value in the stack's `.env.example` |
+| `dist_ref` | empty | branch or tag of openimis-dist_dkr providing the stack; empty means its default branch |
 | `preset` | `medium` | size of the synthetic data: `small`, `medium` or `large` |
 | `users` | `20` | simulated users at the same time |
 | `spawn_rate` | `2` | users started per second |
 | `run_time` | `5m` | how long the load lasts |
 | `fail_ratio` | `0.01` | highest share of failed requests that still passes |
 | `p95_ceiling_ms` | `4000` | highest 95th-percentile response time, in ms, that still passes; `0` switches the check off |
-| `be_tag`, `fe_tag`, `db_tag` | empty | use another backend, frontend or database image tag |
-| `dist_ref` | empty | use another branch or tag of openimis-dist_dkr |
 
-`release-branch` means the newest `release/YY.MM` branch of openimis-be_py whose backend and
-frontend images are published. It moves to the next release on its own once that branch exists.
-
-The release selects every component: the `openimis-be`, `openimis-fe` and `openimis-pgsql` images
-with that tag, and the `release/<release>` branch of openimis-dist_dkr. When the database image or
-the branch does not exist for that release, the run uses `develop` for it instead. The backend
-image must include `seed_synthetic_health_data`, which the claim module ships from release 26.10.
+The nightly run in openimis-dist_dkr passes `develop` for all three images, the way that
+repository's own end-to-end tests do. The backend image must include `seed_synthetic_health_data`,
+which the claim module ships from release 26.10; with an older image the run stops at the seed step
+and says so.
 
 ### Calling it from another repository
 
@@ -61,7 +57,9 @@ jobs:
   load-test:
     uses: openimis/openimis-loadtest/.github/workflows/loadtest.yaml@main
     with:
-      release: develop
+      be_tag: develop
+      fe_tag: develop
+      db_tag: develop
       dist_ref: ${{ github.ref_name }}
 ```
 
@@ -78,7 +76,7 @@ caller's, so it checks out its locustfile from what these inputs name.
 
 ### Reading the result
 
-The run's summary page shows which images and branch were used, the size of the dataset, and the
+The run's summary page shows which images and stack were used, and where each tag came from, the size of the dataset, and the
 response times of every request type. The full results are attached to the run as an artifact: an
 HTML report and CSV and JSON files. When a run fails, the artifact also holds the logs of every
 container in the stack.

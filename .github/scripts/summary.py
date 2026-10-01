@@ -9,12 +9,11 @@ def main(out_dir):
     out = Path(out_dir)
     lines = ["## Load test", ""]
 
-    resolution = out / "resolution.tsv"
-    if resolution.exists():
-        rows = [line.split("\t") for line in resolution.read_text().split("\n") if line.count("\t") == 2]
-        release = os.getenv("RELEASE") or os.getenv("WANTED_RELEASE")
-        lines += [f"### Release `{release}`", "", "| component | used | why |", "|---|---|---|"]
-        lines += [f"| {name} | `{value or '-'}` | {how} |" for name, value, how in rows] + [""]
+    stack = out / "stack.tsv"
+    if stack.exists():
+        rows = [line.split("\t") for line in stack.read_text().split("\n") if line.count("\t") == 2]
+        lines += ["### Stack", "", "| | used | from |", "|---|---|---|"]
+        lines += [f"| {name} | `{value}` | {source} |" for name, value, source in rows] + [""]
 
     profile = [
         ("dataset preset", os.getenv("PRESET")),
@@ -22,7 +21,8 @@ def main(out_dir):
         ("spawn rate, per s", os.getenv("SPAWN_RATE")),
         ("duration", os.getenv("RUN_TIME")),
         ("fail ratio limit", os.getenv("LOADTEST_FAIL_RATIO")),
-        ("p95 ceiling, ms", os.getenv("LOADTEST_P95_MS") or "none"),
+        ("p95 ceiling, ms", os.getenv("LOADTEST_P95_MS") if os.getenv("LOADTEST_P95_MS") not in ("", "0", None)
+         else "none"),
     ]
     lines += ["### Profile", "", "| | |", "|---|---|"] + [f"| {k} | `{v}` |" for k, v in profile] + [""]
 
