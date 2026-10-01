@@ -63,3 +63,16 @@ The users log in the way the web frontend does. They call the `tokenAuth` mutati
 every request. The CSRF header is required: without it, `claims` and `insurees` refuse to answer.
 The server marks both cookies `Secure`, so the locustfile attaches them as an explicit `Cookie`
 header. That lets the same run target plain HTTP, for example a stack on `http://localhost`.
+
+## In GitHub Actions
+
+`.github/workflows/loadtest.yaml` runs the profile every night at 03:00 UTC and on demand from
+the Actions tab. It checks out [openimis-dist_dkr](https://github.com/openimis/openimis-dist_dkr),
+starts that stack with the demo dataset, seeds it with `seed_synthetic_health_data`, runs one user
+for 20 s as a smoke check, then runs the load. The job summary shows the dataset size and the
+latency of every operation; CSV, HTML and JSON results are kept as the run's artifact, and the
+stack's logs are added when the run fails.
+
+A manual run can change the image tags, the `openimis-dist_dkr` branch, the seed preset, the load
+profile and both thresholds. A scheduled run uses the defaults: the `26.10` backend and frontend
+images, the `develop` database image and the `medium` preset.

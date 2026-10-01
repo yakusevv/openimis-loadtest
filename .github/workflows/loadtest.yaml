@@ -1,0 +1,166 @@
+name: Load test
+
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+    inputs:
+      be_tag:
+        description: Backend image tag (openimis-be)
+        default: "26.10"
+      fe_tag:
+        description: Frontend image tag (openimis-fe)
+        default: "26.10"
+      db_tag:
+        description: Database image tag (openimis-pgsql)
+        default: develop
+      dist_ref:
+        description: Branch or tag of openimis-dist_dkr providing the stack
+        default: develop
+      preset:
+        description: seed_synthetic_health_data preset
+        type: choice
+        options: [small, medium, large]
+        default: medium
+      users:
+        description: Concurrent simulated users
+        default: "20"
+      spawn_rate:
+        description: Users started per second
+        default: "2"
+      run_time:
+        description: Load duration, e.g. 5m
+        default: 5m
+      fail_ratio:
+        description: Fail above this share of failed requests
+        default: "0.01"
+      p95_ceiling_ms:
+        description: Fail above this aggregate p95 in ms (empty = no ceiling)
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: load-test
+  cancel-in-progress: false
+
+jobs:
+  load-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      # A scheduled run has no inputs; each falls back to the dispatch default.
+      BE_TAG: ${{ inputs.be_tag || '26.10' }}
+      FE_TAG: ${{ inputs.fe_tag || '26.10' }}
+      DB_TAG: ${{ inputs.db_tag || 'develop' }}
+      DIST_REF: ${{ inputs.dist_ref || 'develop' }}
+      PRESET: ${{ inputs.preset || 'medium' }}
+      USERS: ${{ inputs.users || '20' }}
+      SPAWN_RATE: ${{ inputs.spawn_rate || '2' }}
+      RUN_TIME: ${{ inputs.run_time || '5m' }}
+      LOADTEST_FAIL_RATIO: ${{ inputs.fail_ratio || '0.01' }}
+      LOADTEST_P95_MS: ${{ inputs.p95_ceiling_ms || '' }}
+      TARGET: http://localhost
+    steps:
+      - name: Check out the load test
+        uses: actions/checkout@v4
+
+      - name: Check out the stack
+        uses: actions/checkout@v4
+        with:
+          repository: openimis/openimis-dist_dkr
+          ref: ${{ env.DIST_REF }}
+          path: dist
+
+      - name: Start the stack
+        working-directory: dist
+        run: |
+          cp .env.example .env
+          sed -i '/^DEMO_DATASET=/d;/^BE_TAG=/d;/^FE_TAG=/d;/^DB_TAG=/d;/^SECRET_KEY=/d;/^DOMAIN=/d;/^HOSTS=/d' .env
+          {
+            echo "SECRET_KEY=loadtest"
+            echo "DEMO_DATASET=true"
+            echo "BE_TAG=$BE_TAG"
+            echo "FE_TAG=$FE_TAG"
+            echo "DB_TAG=$DB_TAG"
+            echo "DOMAIN=localhost"
+            echo "HOSTS=localhost"
+            # Celery is not under test; one worker leaves the memory to the stack that is.
+            echo "WORKER_REPLICAS=1"
+          } >> .env
+          cp .env.openSearch.example .env.openSearch
+          docker compose up -d --quiet-pull
+          for i in $(seq 1 60); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' \
+              -d '{"query":"{ __typename }"}' "$TARGET/api/graphql" || true)
+            if [ "$code" = 200 ]; then echo "API ready after $((i * 10)) s"; exit 0; fi
+            sleep 10
+          done
+          echo "::error::the API did not answer through nginx within 10 minutes"
+          docker compose ps -a
+          exit 1
+
+      - name: Seed the dataset
+        working-directory: dist
+        run: |
+          # --no-deps: without it compose runs the migrations service again first.
+          if ! docker compose run --rm --no-deps -T backend manage help seed_synthetic_health_data > /dev/null 2>&1; then
+            echo "::error::openimis-be:$BE_TAG has no seed_synthetic_health_data command; it ships in the claim module from release 26.10"
+            exit 1
+          fi
+          docker compose run --rm --no-deps -T backend manage seed_synthetic_health_data --preset "$PRESET" --no-confirm \
+            | grep -v -E 'Progress:'
+          mkdir -p ../out
+          docker compose exec -T db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -t -A -F "	" -c "
+            select t, n from (
+              select 1, '\''families'\'', count(*) from \"tblFamilies\" where \"ValidityTo\" is null
+              union all select 2, '\''insurees'\'', count(*) from \"tblInsuree\" where \"ValidityTo\" is null
+              union all select 3, '\''policies'\'', count(*) from \"tblPolicy\" where \"ValidityTo\" is null
+              union all select 4, '\''claims'\'', count(*) from \"tblClaim\" where \"ValidityTo\" is null
+              union all select 5, '\''claim items'\'', count(*) from \"tblClaimItems\"
+              union all select 6, '\''claim services'\'', count(*) from \"tblClaimServices\"
+            ) x(o, t, n) order by o"' > ../out/dataset.tsv
+          cat ../out/dataset.tsv
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install Locust
+        run: pip install -r requirements.txt
+
+      - name: Smoke, one user
+        # Any failed request fails this step: a broken endpoint is reported here, not as a slow one.
+        env:
+          LOADTEST_FAIL_RATIO: "0"
+          LOADTEST_P95_MS: ""
+        run: locust --headless --host "$TARGET" -u 1 -r 1 -t 20s
+
+      - name: Load
+        id: load
+        run: >-
+          locust --headless --host "$TARGET" -u "$USERS" -r "$SPAWN_RATE" -t "$RUN_TIME"
+          --csv out/run --html out/report.html --json-file out/summary
+
+      - name: Job summary
+        if: always()
+        run: python .github/scripts/summary.py out >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Stack logs
+        if: failure()
+        working-directory: dist
+        run: |
+          mkdir -p ../out
+          docker compose ps -a > ../out/compose-ps.txt
+          docker compose logs --no-color --timestamps > ../out/compose.log
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: load-test-${{ github.run_id }}
+          path: out/
+          if-no-files-found: warn
