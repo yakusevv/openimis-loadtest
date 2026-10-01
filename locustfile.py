@@ -1,282 +1,259 @@
+import logging
+import os
 import random
-import re
-from json import JSONDecodeError
-from urllib.parse import urlencode
+import signal
 
-from locust import HttpUser, task, run_single_user
-#from locust_plugins.csvreader import CSVReader
+import gevent
+import requests
+from locust import HttpUser, between, events, task
 
-LEGACY_LOGIN = False
-SITE_USER = "Admin"
-SITE_PASSWD = "admin123"
-INSUREE_IDS = ["070707070"]
-#API_ROOT = "/iapi" if LEGACY_LOGIN else "/api"  # api or ipai, feel free to override if necessary
-API_ROOT = "/api"
-HF_UUID = "E4C10505-AFC5-4E44-9E70-C9993B3CEE4B"  # Release
-# HF_UUID = "05EF3CA3-6B37-4793-8714-6CFE97B7B639"  # Eric
-HF_PARENT_UUID = "1DBB7008-9CF8-4D1E-9AAD-1487DD0E813E"  # Release
-# HF_PARENT_UUID = "353218AE-0F97-4580-B529-9DF7BEA49BE6"  # Eric
+API_ROOT = os.getenv("LOADTEST_API_ROOT", "/api")
+USERNAME = os.getenv("LOADTEST_USER", "Admin")
+PASSWORD = os.getenv("LOADTEST_PASSWORD", "admin123")
+FAIL_RATIO = float(os.getenv("LOADTEST_FAIL_RATIO", "0.01"))
+P95_MS = os.getenv("LOADTEST_P95_MS", "")
+SAMPLE_SIZE = int(os.getenv("LOADTEST_SAMPLE_SIZE", "200"))
+
+logger = logging.getLogger(__name__)
+
+LOGIN = """mutation($username: String!, $password: String!) {
+  tokenAuth(username: $username, password: $password) { refreshExpiresIn }
+}"""
+
+CSRF = "mutation { getCsrfToken { csrfToken } }"
+
+PAGE = 100  # the largest page the server allows on a connection
+
+DISCOVER = """query($first: Int, $after: String) {
+  claims(first: $first, after: $after, orderBy: ["-dateClaimed"]) {
+    pageInfo { hasNextPage endCursor }
+    edges { node {
+      uuid
+      insuree { chfId }
+      healthFacility { location { uuid parent { uuid } } }
+    } }
+  }
+}"""
+
+CLAIMS = """query($parent: String, $location: String, $first: Int) {
+  claims(healthFacility_Location_Parent_Uuid: $parent, healthFacility_Location_Uuid: $location,
+         orderBy: ["-dateClaimed"], first: $first) {
+    totalCount
+    pageInfo { hasNextPage hasPreviousPage startCursor endCursor }
+    edges { node {
+      uuid code jsonExt dateClaimed feedbackStatus reviewStatus claimed approved status
+      healthFacility { id uuid name code }
+      insuree { id uuid chfId lastName otherNames }
+      attachmentsCount
+    } }
+  }
+}"""
+
+CLAIM = """query($uuid: UUID) {
+  claim(uuid: $uuid) {
+    uuid code status dateFrom dateTo dateClaimed claimed approved
+    icd { code name }
+    insuree { chfId lastName otherNames }
+    healthFacility { code name }
+    items { item { code name } qtyProvided priceAsked status }
+    services { service { code name } qtyProvided priceAsked status }
+  }
+}"""
+
+INSUREE = """query($chfId: String) {
+  insurees(chfId: $chfId) {
+    edges { node {
+      id uuid chfId lastName otherNames dob age validityFrom validityTo
+      family { id }
+      gender { code gender altLanguage }
+      healthFacility {
+        id uuid code name level
+        location { id uuid code name parent { id uuid code name } }
+      }
+    } }
+  }
+}"""
+
+POLICIES = """query($chfId: String!) {
+  policiesByInsuree(chfId: $chfId, orderBy: "expiryDate", activeOrLastExpiredOnly: true, first: 5) {
+    totalCount
+    edges { node {
+      policyUuid productCode productName officerCode officerName enrollDate effectiveDate
+      startDate expiryDate status policyValue balance ded dedInPatient dedOutPatient
+      ceiling ceilingInPatient ceilingOutPatient
+    } }
+  }
+}"""
+
+PREMIUMS = """query($policyUuids: [String]!) {
+  premiumsByPolicies(policyUuids: $policyUuids, orderBy: "-payDate", first: 5) {
+    totalCount
+    edges { node { id uuid payDate amount payType receipt isPhotoFee payer { id uuid name } } }
+  }
+}"""
+
+PRODUCTS = """query($first: Int) {
+  products(first: $first) {
+    totalCount
+    edges { node { uuid code name dateFrom dateTo maxMembers lumpSum } }
+  }
+}"""
 
 
-#insuree_reader = CSVReader("insuree_numbers.csv")
+def log_in(client, post):
+    """The browser's login: a JWT cookie, a server-side session holding the CSRF token,
+    and that token echoed in X-CSRFToken on every request.
 
-class SimpleUser(HttpUser):
-    @task
-    def current_user(self):
-        self.client.get(f"{API_ROOT}/core/users/current_user/")
+    Both cookies are issued with the Secure flag, so a client following cookie rules
+    would not send them back over plain HTTP. They are attached as an explicit header
+    instead, which works on HTTP and HTTPS alike.
+    """
+    login = post({"query": LOGIN, "variables": {"username": USERNAME, "password": PASSWORD}}, "tokenAuth")
+    cookies = dict(login.cookies)
+    if "JWT" not in cookies:
+        raise RuntimeError(f"login as {USERNAME} failed: HTTP {login.status_code} {login.text[:200]}")
+    _send_cookies(client, cookies)
+    csrf = post({"query": CSRF}, "getCsrfToken")
+    cookies.update(csrf.cookies)
+    _send_cookies(client, cookies)
+    client.headers["X-CSRFToken"] = csrf.json()["data"]["getCsrfToken"]["csrfToken"]
 
-    @task
-    def list_claims(self):
-        self.client.post(
-            f"{API_ROOT}/graphql",
-            json={
-                "query": """
-                {
-                      claims(status: 2, healthFacility_Location_Parent_Uuid: "%s", 
-                      healthFacility_Location_Uuid: "%s",orderBy: ["-dateClaimed"],
-                      first: 10)
-                    {
-                        totalCount
-                        pageInfo { hasNextPage, hasPreviousPage, startCursor, endCursor}
-                        edges {      
-                            node {
-                                uuid,code,jsonExt,dateClaimed,feedbackStatus,reviewStatus,claimed,approved,status,
-                                healthFacility { id uuid name code },insuree{id, uuid, chfId, lastName, otherNames},
-                                attachmentsCount
-                            }
-                        }
-                    }
-                }""" % (HF_PARENT_UUID, HF_UUID)
-            },
-            name="list_claims"
-        )
 
-    @task
-    def eligibility(self):
-        insuree_id = random.choice(INSUREE_IDS)
-        #(insuree_id,) = next(insuree_reader)
-        with self.client.post(
-            f"{API_ROOT}/graphql",
-            json={
-                "query": """
-                {
-                  insurees(chfId: "%s") {
-                    pageInfo {
-                      hasNextPage
-                      hasPreviousPage
-                      startCursor
-                      endCursor
-                    }
-                    edges {
-                      node {
-                        id
-                        uuid
-                        chfId
-                        lastName
-                        otherNames
-                        dob
-                        age
-                        validityFrom
-                        validityTo
-                        gender { code }
-                        family { id }
-                        photo { folder filename photo }
-                        gender { code gender altLanguage }
-                        healthFacility {
-                          id
-                          uuid
-                          code
-                          name
-                          level
-                          servicesPricelist { id uuid }
-                          itemsPricelist { id uuid }
-                          location {
-                            id uuid code name
-                            parent { id uuid code name }
-                          }
-                        }
-                      }
-                    }
-                  }
-                }""" % (insuree_id,)
-            },
-            name="insurees"
-        ) as response:
-            pass
-            # print("Got response1", response.status_code, response.text)
-        self.client.post(
-            f"{API_ROOT}/graphql",
-            json={
-                "query": """
-                {
-                  policiesByInsuree(orderBy: "expiryDate", activeOrLastExpiredOnly: true, chfId: "%s", first: 5) {
-                    totalCount
-                    pageInfo {
-                      hasNextPage
-                      hasPreviousPage
-                      startCursor
-                      endCursor
-                    }
-                    edges {
-                      node {
-                        policyUuid
-                        productCode
-                        productName
-                        officerCode
-                        officerName
-                        enrollDate
-                        effectiveDate
-                        startDate
-                        expiryDate
-                        status
-                        policyValue
-                        balance
-                        ded
-                        dedInPatient
-                        dedOutPatient
-                        ceiling
-                        ceilingInPatient
-                        ceilingOutPatient
-                      }
-                    }
-                  }
-                }""" % (insuree_id,)
-            },
-            name="policiesByInsuree"
-        )
-        with self.client.post(
-                f"{API_ROOT}/graphql",
-                json={
-                    "query": """
-                {
-                  policiesByInsuree(orderBy: "expiryDate", activeOrLastExpiredOnly: true, chfId: "%s", first: 5) {
-                    totalCount
-                    pageInfo {
-                      hasNextPage
-                      hasPreviousPage
-                      startCursor
-                      endCursor
-                    }
-                    edges {
-                      node {
-                        policyUuid
-                        productCode
-                        productName
-                        officerCode
-                        officerName
-                        enrollDate
-                        effectiveDate
-                        startDate
-                        expiryDate
-                        status
-                        policyValue
-                        balance
-                        ded
-                        dedInPatient
-                        dedOutPatient
-                        ceiling
-                        ceilingInPatient
-                        ceilingOutPatient
-                      }
-                    }
-                  }
-                }""" % (insuree_id,)
-                },
-                catch_response=True,
-                name="policiesByInsuree2"
-        ) as response:
-            try:
-                print("Got response2", response.status_code, response.text)
-                j = response.json()
-                policyUuid = j["data"]["policiesByInsuree"]["edges"][0]["node"]["policyUuid"]
-                print("Uuid: ", policyUuid)
-            except KeyError:
-                print("Key Error", response.text)
-                response.failure("Couldn't find a policy in the response")
-            except JSONDecodeError:
-                print("JSON Error", response.text)
-                response.failure("Couldn't decode policy response JSON")
+def _send_cookies(client, cookies):
+    client.cookies.clear()
+    client.headers["Cookie"] = "; ".join(f"{name}={value}" for name, value in cookies.items())
 
-        self.client.post(
-            f"{API_ROOT}/graphql",
-            json={
-                "query": """
-                {
-                  premiumsByPolicies(orderBy: "-payDate", policyUuids: ["%s"], first: 5) {
-                    totalCount
-                    pageInfo {
-                      hasNextPage
-                      hasPreviousPage
-                      startCursor
-                      endCursor
-                    }
-                    edges {
-                      node {
-                        id
-                        uuid
-                        payDate
-                        payer {
-                          id
-                          uuid
-                          name
-                        }
-                        amount
-                        payType
-                        receipt
-                        isPhotoFee
-                      }
-                    }
-                  }
-                }""" % (policyUuid,)
-            },
-            name="premiumsByPolicies"
-        )
+
+def _facility_location(node):
+    location = (node.get("healthFacility") or {}).get("location") or {}
+    return (location.get("parent") or {}).get("uuid"), location.get("uuid")
+
+
+class Sample:
+    """Claims, insurees and health facilities read once per run from whatever the target
+    holds, so the scenarios carry no identifiers of a particular server."""
+
+    claims = []
+    chf_ids = []
+    locations = []
+
+    @classmethod
+    def load(cls, host):
+        url = f"{host}{API_ROOT}/graphql"
+        with requests.Session() as client:
+            client.headers["Content-Type"] = "application/json"
+            log_in(client, lambda body, _name: client.post(url, json=body, timeout=120))
+            nodes, after = [], None
+            while len(nodes) < SAMPLE_SIZE:
+                variables = {"first": min(PAGE, SAMPLE_SIZE - len(nodes)), "after": after}
+                reply = client.post(url, json={"query": DISCOVER, "variables": variables}, timeout=300).json()
+                if reply.get("errors"):
+                    raise RuntimeError(f"discovery failed: {reply['errors']}")
+                page = reply["data"]["claims"]
+                nodes += [edge["node"] for edge in page["edges"]]
+                if not page["pageInfo"]["hasNextPage"]:
+                    break
+                after = page["pageInfo"]["endCursor"]
+        cls.claims = [n["uuid"] for n in nodes]
+        cls.chf_ids = sorted({n["insuree"]["chfId"] for n in nodes if n.get("insuree")})
+        cls.locations = sorted({loc for loc in map(_facility_location, nodes) if all(loc)})
+        if not (cls.claims and cls.chf_ids and cls.locations):
+            raise RuntimeError("discovery found no claims to sample: is the target seeded?")
+        logger.info("sample: %d claims, %d insurees, %d facility locations",
+                    len(cls.claims), len(cls.chf_ids), len(cls.locations))
+
+
+@events.test_start.add_listener
+def _discover(environment, **_):
+    # Locust logs an exception raised here and starts the users anyway, and runner.quit()
+    # issued now is undone by the spawn that follows; SIGTERM takes Locust's normal shutdown.
+    try:
+        Sample.load(environment.host)
+    except Exception:
+        logger.exception("discovery failed, stopping")
+        environment.discovery_failed = True
+        gevent.spawn_later(0, os.kill, os.getpid(), signal.SIGTERM)
+
+
+@events.quitting.add_listener
+def _thresholds(environment, **_):
+    if getattr(environment, "discovery_failed", False):
+        environment.process_exit_code = 1
+        return
+    total = environment.stats.total
+    if total.num_requests == 0:
+        logger.error("no requests were made")
+        environment.process_exit_code = 1
+        return
+    reasons = []
+    # Setting process_exit_code overrides Locust's own exit-on-error, so crashed tasks are counted here.
+    crashes = sum(e["count"] for e in environment.runner.exceptions.values())
+    if crashes:
+        reasons.append(f"{crashes} unhandled exceptions in tasks")
+    if total.fail_ratio > FAIL_RATIO:
+        reasons.append(f"fail ratio {total.fail_ratio:.2%} > {FAIL_RATIO:.2%}")
+    if P95_MS:
+        p95 = total.get_response_time_percentile(0.95)
+        if p95 > float(P95_MS):
+            reasons.append(f"p95 {p95:.0f} ms > {float(P95_MS):.0f} ms")
+    for reason in reasons:
+        logger.error("threshold exceeded: %s", reason)
+    environment.process_exit_code = 1 if reasons else 0
+
+
+class HealthFinancingUser(HttpUser):
+    wait_time = between(1, 3)
 
     def on_start(self):
-        if LEGACY_LOGIN:
-            prelogin = self.client.get(
-                "/",
-                name="prelogin"
-            )
-            form = {
-                **extract_hidden_headers(prelogin.text),
-                "hfOfflineHFIDFlag": 0,
-                "txtUserName": SITE_USER,
-                "txtPassword": SITE_PASSWD,
-                "btnLogin": "Login",
-            }
+        self.client.headers["Content-Type"] = "application/json"
+        log_in(self.client, lambda body, name: self.client.post(f"{API_ROOT}/graphql", json=body, name=name))
 
-            print("encoded:", urlencode(form))
-            with self.client.post(
-                    "/",
-                    data=urlencode(form),
-                    headers={"Content-Type": "application/x-www-form-urlencoded"},
-                    catch_response=True,
-                    name="login"
-            ) as response:
-                if response.status_code != 200 or "script src=\"/front" not in response.text:
-                    print("Failed to login to legacy", response.status_code, response.text)
-                    response.failure("Failed to login")
-        else:
-            self.client.post(
-                f"{API_ROOT}/graphql",
-                json={"query": """mutation authenticate($username: String!, $password: String!) {
-                      tokenAuth(username: $username, password: $password) {
-                          refreshExpiresIn
-                      }
-                      }""", "variables": {"username": SITE_USER, "password": SITE_PASSWD}
-                      },
-                name="login"
-            )
+    def graphql(self, name, query, variables):
+        with self.client.post(
+            f"{API_ROOT}/graphql",
+            json={"query": query, "variables": variables},
+            name=name,
+            catch_response=True,
+        ) as response:
+            if response.status_code != 200:
+                response.failure(f"HTTP {response.status_code}")
+                return None
+            try:
+                body = response.json()
+            except ValueError:
+                response.failure("response is not JSON")
+                return None
+            if body.get("errors"):
+                response.failure(str(body["errors"])[:300])
+                return None
+            return body.get("data")
 
+    @task(1)
+    def current_user(self):
+        self.client.get(f"{API_ROOT}/core/users/current_user/", name="current_user")
 
-HIDDEN_HEADER_RE = re.compile('<input type="hidden" name="(_.*)" id=".*" value="(.*)" />')
+    @task(5)
+    def claims_by_facility(self):
+        parent, location = random.choice(Sample.locations)
+        first = random.choice((10, 20, 50))
+        self.graphql(f"claims first:{first}", CLAIMS, {"parent": parent, "location": location, "first": first})
 
+    @task(3)
+    def claim_detail(self):
+        self.graphql("claim", CLAIM, {"uuid": random.choice(Sample.claims)})
 
-def extract_hidden_headers(html):
-    return {x[0]: x[1] for x in HIDDEN_HEADER_RE.findall(html)}
+    @task(4)
+    def eligibility(self):
+        chf_id = random.choice(Sample.chf_ids)
+        if self.graphql("insurees", INSUREE, {"chfId": chf_id}) is None:
+            return
+        data = self.graphql("policiesByInsuree", POLICIES, {"chfId": chf_id})
+        if not data:
+            return
+        uuids = [edge["node"]["policyUuid"] for edge in data["policiesByInsuree"]["edges"]]
+        if uuids:
+            self.graphql("premiumsByPolicies", PREMIUMS, {"policyUuids": uuids})
 
-
-# if launched directly, e.g. "python3 debugging.py", not "locust -f debugging.py"
-if __name__ == "__main__":
-    run_single_user(SimpleUser)
+    @task(1)
+    def products(self):
+        self.graphql("products", PRODUCTS, {"first": random.choice((10, 20))})
