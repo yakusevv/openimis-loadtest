@@ -8,11 +8,14 @@ from pathlib import Path
 def main(out_dir):
     out = Path(out_dir)
     lines = ["## Load test", ""]
+
+    resolution = out / "resolution.tsv"
+    if resolution.exists():
+        rows = [line.split("\t") for line in resolution.read_text().split("\n") if line.count("\t") == 2]
+        lines += [f"### Release `{os.getenv('RELEASE')}`", "", "| component | used | why |", "|---|---|---|"]
+        lines += [f"| {name} | `{value or '-'}` | {how} |" for name, value, how in rows] + [""]
+
     profile = [
-        ("backend image", os.getenv("BE_TAG")),
-        ("frontend image", os.getenv("FE_TAG")),
-        ("database image", os.getenv("DB_TAG")),
-        ("openimis-dist_dkr ref", os.getenv("DIST_REF")),
         ("dataset preset", os.getenv("PRESET")),
         ("users", os.getenv("USERS")),
         ("spawn rate, per s", os.getenv("SPAWN_RATE")),
@@ -20,7 +23,7 @@ def main(out_dir):
         ("fail ratio limit", os.getenv("LOADTEST_FAIL_RATIO")),
         ("p95 ceiling, ms", os.getenv("LOADTEST_P95_MS") or "none"),
     ]
-    lines += ["| | |", "|---|---|"] + [f"| {k} | `{v}` |" for k, v in profile] + [""]
+    lines += ["### Profile", "", "| | |", "|---|---|"] + [f"| {k} | `{v}` |" for k, v in profile] + [""]
 
     dataset = out / "dataset.tsv"
     if dataset.exists():

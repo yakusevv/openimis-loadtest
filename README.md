@@ -1,19 +1,75 @@
 # openimis-loadtest
 
-Load tests for openIMIS, written for [Locust](https://locust.io). The profile in
-`locustfile.py` covers the health-financing read paths:
+Load tests for openIMIS, written with [Locust](https://locust.io).
 
-| Scenario | Requests | Weight |
+They exercise the health-financing read paths of the GraphQL API with many simulated users at
+once, and fail when too many requests fail or when responses get too slow.
+
+## What is tested
+
+| Scenario | Requests | Share |
 |---|---|---|
-| session | `GET /api/core/users/current_user/` | 1 |
-| claims of a health facility, 10 / 20 / 50 per page | `claims` | 5 |
-| claim detail | `claim(uuid:)` | 3 |
-| eligibility | `insurees(chfId:)`, then `policiesByInsuree`, then `premiumsByPolicies` | 4 |
-| products | `products` | 1 |
+| claims of a health facility, 10, 20 or 50 per page | `claims` | 5 |
+| eligibility check of an insuree | `insurees`, `policiesByInsuree`, `premiumsByPolicies` | 4 |
+| claim detail | `claim` | 3 |
+| current user | `GET /api/core/users/current_user/` | 1 |
+| product list | `products` | 1 |
 
-Each simulated user logs in once, then waits 1–3 s between tasks.
+Each simulated user logs in once, then picks a scenario at random, weighted by its share, every
+1 to 3 seconds. The claims, insurees and health facilities it asks for are read from the target
+when the run starts, so the tests work against any openIMIS instance that has claims.
 
-## Running
+## Running in GitHub Actions
+
+The **Load test** workflow runs every night at 03:00 UTC. It tests two lines side by side, as two
+jobs of one run: `develop`, and the newest release branch. To run it yourself, open the Actions
+tab, choose **Load test** and **Run workflow**.
+
+Each run starts a complete openIMIS stack from
+[openimis-dist_dkr](https://github.com/openimis/openimis-dist_dkr) with the demo dataset, adds
+synthetic data with the claim module's `seed_synthetic_health_data` command, checks every scenario
+with a single user, and then runs the load. A run takes about 20 minutes.
+
+| Input | Default | Meaning |
+|---|---|---|
+| `release` | `develop` | openIMIS release to test: `develop`, a release such as `26.10`, or `release-branch` for the newest release branch. Several, separated by commas, run as parallel jobs; `develop,release-branch` repeats the nightly run |
+| `preset` | `medium` | size of the synthetic data: `small`, `medium` or `large` |
+| `users` | `20` | simulated users at the same time |
+| `spawn_rate` | `2` | users started per second |
+| `run_time` | `5m` | how long the load lasts |
+| `fail_ratio` | `0.01` | highest share of failed requests that still passes |
+| `p95_ceiling_ms` | `4000` | highest 95th-percentile response time, in ms, that still passes |
+| `be_tag`, `fe_tag`, `db_tag` | empty | use another backend, frontend or database image tag |
+| `dist_ref` | empty | use another branch or tag of openimis-dist_dkr |
+
+`release-branch` means the newest `release/YY.MM` branch of openimis-be_py whose backend and
+frontend images are published. It moves to the next release on its own once that branch exists.
+
+The release selects every component: the `openimis-be`, `openimis-fe` and `openimis-pgsql` images
+with that tag, and the `release/<release>` branch of openimis-dist_dkr. When the database image or
+the branch does not exist for that release, the run uses `develop` for it instead. The backend
+image must include `seed_synthetic_health_data`, which the claim module ships from release 26.10.
+
+### Reading the result
+
+The run's summary page shows which images and branch were used, the size of the dataset, and the
+response times of every request type. The full results are attached to the run as an artifact: an
+HTML report and CSV and JSON files. When a run fails, the artifact also holds the logs of every
+container in the stack.
+
+A run fails when:
+
+- more than `fail_ratio` of the requests fail, counting HTTP errors and GraphQL errors;
+- the 95th-percentile response time over all requests exceeds `p95_ceiling_ms`;
+- a scenario fails at all in the single-user check;
+- the stack does not start, or the data cannot be seeded.
+
+The runner is a shared GitHub-hosted machine that also runs the load generator, so compare runs
+with each other rather than reading the numbers as production performance.
+
+## Running locally
+
+Against any openIMIS instance that has claims:
 
 ```bash
 python3 -m venv .venv
@@ -21,59 +77,34 @@ python3 -m venv .venv
 .venv/bin/locust --headless --host https://your-openimis.example.org
 ```
 
-`locust.conf` sets 20 users, spawned at 2 per second, for 5 minutes. Command-line flags
-override it, for example `-u 50 -t 10m`. Leave out `--headless` to drive the run from the web UI
-on `http://localhost:8089` instead.
+This runs 20 users for 5 minutes, as set in `locust.conf`. Flags override it, for example
+`-u 50 -t 10m`. Without `--headless`, Locust opens a web UI on `http://localhost:8089` where you
+start and watch the run.
 
-Add `--csv=out/run --html=out/report.html --json-file=out/summary` to keep the results. Locust
-appends `.json` to the last one.
+To keep the results, add `--csv=out/run --html=out/report.html --json-file=out/summary`.
 
-The target needs data to read. Seed it with the claim module's generator first, on a database you
-can throw away:
+To add synthetic data to an instance first, run this on its backend. Only do this on a database
+you can throw away:
 
 ```bash
 python manage.py seed_synthetic_health_data --preset medium --no-confirm
 ```
 
-At start, the run reads a sample of up to 200 recent claims, with their insurees and health
-facilities, from the target. The scenarios draw from that sample, so nothing in this repository
-names a record of a particular server. A target without claims stops the run before any user
-starts.
-
 ## Configuration
 
-Environment variables:
+Environment variables read by `locustfile.py`:
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `LOADTEST_USER` / `LOADTEST_PASSWORD` | `Admin` / `admin123` | the account every simulated user logs in as; it must see all health facilities |
-| `LOADTEST_API_ROOT` | `/api` | the backend's `SITE_ROOT` |
-| `LOADTEST_FAIL_RATIO` | `0.01` | fail the run above this share of failed requests |
-| `LOADTEST_P95_MS` | unset | fail the run when the aggregate 95th percentile exceeds this many milliseconds |
-| `LOADTEST_SAMPLE_SIZE` | `200` | how many claims the start-up sample reads |
+| `LOADTEST_USER`, `LOADTEST_PASSWORD` | `Admin`, `admin123` | account the simulated users log in with; it must see all health facilities |
+| `LOADTEST_API_ROOT` | `/api` | path of the openIMIS API |
+| `LOADTEST_FAIL_RATIO` | `0.01` | highest share of failed requests that still passes |
+| `LOADTEST_P95_MS` | not set | highest 95th-percentile response time, in ms; not checked when not set |
+| `LOADTEST_SAMPLE_SIZE` | `200` | how many recent claims are read at the start to draw from |
 
-The process exits 1 when a threshold is exceeded, when a task raises, or when the start-up sample
-cannot be read. Otherwise it exits 0. A request counts as failed on any HTTP status other than 200
-and on any GraphQL `errors` in the response.
+Locust exits with code 1 when the run fails and 0 when it passes.
 
-## Login
-
-The users log in the way the web frontend does. They call the `tokenAuth` mutation, then the
-`getCsrfToken` mutation, then send the session and JWT cookies and an `X-CSRFToken` header with
-every request. The CSRF header is required: without it, `claims` and `insurees` refuse to answer.
-The server marks both cookies `Secure`, so the locustfile attaches them as an explicit `Cookie`
-header. That lets the same run target plain HTTP, for example a stack on `http://localhost`.
-
-## In GitHub Actions
-
-`.github/workflows/loadtest.yaml` runs the profile every night at 03:00 UTC and on demand from
-the Actions tab. It checks out [openimis-dist_dkr](https://github.com/openimis/openimis-dist_dkr),
-starts that stack with the demo dataset, seeds it with `seed_synthetic_health_data`, runs one user
-for 20 s as a smoke check, then runs the load. The job summary shows the dataset size and the
-latency of every operation; CSV, HTML and JSON results are kept as the run's artifact, and the
-stack's logs are added when the run fails.
-
-A manual run can change the image tags, the `openimis-dist_dkr` branch, the seed preset, the load
-profile and both thresholds. A scheduled run uses the defaults: the `26.10` backend and frontend
-images, the `develop` database image, the `medium` preset, 20 users for 5 minutes, and a p95
-ceiling of 4 s: three times what that profile measured on a hosted runner.
+The simulated users log in the way the openIMIS web frontend does: the `tokenAuth` mutation, then
+the `getCsrfToken` mutation, and then every request carries the session cookies and an
+`X-CSRFToken` header. The cookies are sent explicitly, so the tests also work against an instance
+served over plain HTTP.

@@ -5,18 +5,23 @@ on:
     - cron: "0 3 * * *"
   workflow_dispatch:
     inputs:
+      release:
+        description: >-
+          openIMIS release to test: develop, a release such as 26.10, or release-branch for the newest
+          release branch; several, comma-separated, run side by side as the nightly does
+        default: develop
       be_tag:
-        description: Backend image tag (openimis-be)
-        default: "26.10"
+        description: Override the backend image tag (openimis-be)
+        default: ""
       fe_tag:
-        description: Frontend image tag (openimis-fe)
-        default: "26.10"
+        description: Override the frontend image tag (openimis-fe)
+        default: ""
       db_tag:
-        description: Database image tag (openimis-pgsql)
-        default: develop
+        description: Override the database image tag (openimis-pgsql)
+        default: ""
       dist_ref:
-        description: Branch or tag of openimis-dist_dkr providing the stack
-        default: develop
+        description: Override the openimis-dist_dkr branch or tag providing the stack
+        default: ""
       preset:
         description: seed_synthetic_health_data preset
         type: choice
@@ -46,15 +51,35 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      releases: ${{ steps.plan.outputs.releases }}
+    steps:
+      - id: plan
+        env:
+          # The nightly tests the line in development and the line about to ship.
+          WANTED: ${{ github.event_name == 'schedule' && 'develop,release-branch' || inputs.release || 'develop' }}
+        run: >-
+          python3 -c 'import json, os; print("releases=" + json.dumps([r.strip() for r in os.environ["WANTED"].split(",") if r.strip()]))'
+          >> "$GITHUB_OUTPUT"
+
   load-test:
+    name: load-test (${{ matrix.release }})
+    needs: plan
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        release: ${{ fromJSON(needs.plan.outputs.releases) }}
     env:
+      WANTED_RELEASE: ${{ matrix.release }}
       # A scheduled run has no inputs; each falls back to the dispatch default.
-      BE_TAG: ${{ inputs.be_tag || '26.10' }}
-      FE_TAG: ${{ inputs.fe_tag || '26.10' }}
-      DB_TAG: ${{ inputs.db_tag || 'develop' }}
-      DIST_REF: ${{ inputs.dist_ref || 'develop' }}
+      OVERRIDE_BE_TAG: ${{ inputs.be_tag }}
+      OVERRIDE_FE_TAG: ${{ inputs.fe_tag }}
+      OVERRIDE_DB_TAG: ${{ inputs.db_tag }}
+      OVERRIDE_DIST_REF: ${{ inputs.dist_ref }}
       PRESET: ${{ inputs.preset || 'medium' }}
       USERS: ${{ inputs.users || '20' }}
       SPAWN_RATE: ${{ inputs.spawn_rate || '2' }}
@@ -66,6 +91,50 @@ jobs:
     steps:
       - name: Check out the load test
         uses: actions/checkout@v4
+
+      - name: Resolve the release
+        # Each component follows the release where upstream publishes it and falls back to
+        # develop where it does not; the job summary shows which is which.
+        run: |
+          mkdir -p out
+          : > out/resolution.tsv
+          pick() {  # name, override, wanted, exists-check command, fallback
+            local name=$1 override=$2 wanted=$3 check=$4 fallback=$5 value how
+            if [ -n "$override" ]; then value=$override how="override"
+            elif [ "$wanted" = develop ] || $check "$wanted"; then value=$wanted how="release"
+            else value=$fallback how="fallback: $wanted not published"
+            fi
+            printf '%s\t%s\t%s\n' "$name" "$value" "$how" >> out/resolution.tsv
+            echo "$value"
+          }
+          image() { docker manifest inspect "ghcr.io/openimis/$IMAGE:$1" > /dev/null 2>&1; }
+          branch() { git ls-remote --exit-code --heads https://github.com/openimis/openimis-dist_dkr.git "$1" > /dev/null; }
+          RELEASE=$WANTED_RELEASE
+          if [ "$RELEASE" = release-branch ]; then
+            RELEASE=""
+            for b in $(git ls-remote --heads https://github.com/openimis/openimis-be_py.git 'release/*' \
+                | grep -o -E 'release/[0-9]{2}\.[0-9]{2}$' | cut -d/ -f2 | sort -r -V); do
+              if IMAGE=openimis-be image "$b" && IMAGE=openimis-fe image "$b"; then RELEASE=$b; break; fi
+            done
+            if [ -z "$RELEASE" ]; then
+              echo "::error::no release branch of openimis-be_py has published backend and frontend images"
+              exit 1
+            fi
+            printf 'release\t%s\t%s\n' "$RELEASE" "newest release branch with published images" >> out/resolution.tsv
+          fi
+          echo "RELEASE=$RELEASE" >> "$GITHUB_ENV"
+          dist=$( [ "$RELEASE" = develop ] && echo develop || echo "release/$RELEASE" )
+          {
+            echo "BE_TAG=$(IMAGE=openimis-be pick 'backend image' "$OVERRIDE_BE_TAG" "$RELEASE" image '')"
+            echo "FE_TAG=$(IMAGE=openimis-fe pick 'frontend image' "$OVERRIDE_FE_TAG" "$RELEASE" image '')"
+            echo "DB_TAG=$(IMAGE=openimis-pgsql pick 'database image' "$OVERRIDE_DB_TAG" "$RELEASE" image develop)"
+            echo "DIST_REF=$(pick 'openimis-dist_dkr ref' "$OVERRIDE_DIST_REF" "$dist" branch develop)"
+          } >> "$GITHUB_ENV"
+          column -t -s "$(printf '\t')" out/resolution.tsv
+          if grep -q -P "^(backend|frontend) image\t\t" out/resolution.tsv; then
+            echo "::error::release $RELEASE has no published backend or frontend image"
+            exit 1
+          fi
 
       - name: Check out the stack
         uses: actions/checkout@v4
@@ -162,6 +231,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: load-test-${{ github.run_id }}
+          name: load-test-${{ matrix.release }}-${{ github.run_id }}
           path: out/
           if-no-files-found: warn
