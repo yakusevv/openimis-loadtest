@@ -12,7 +12,8 @@ def main(out_dir):
     resolution = out / "resolution.tsv"
     if resolution.exists():
         rows = [line.split("\t") for line in resolution.read_text().split("\n") if line.count("\t") == 2]
-        lines += [f"### Release `{os.getenv('RELEASE')}`", "", "| component | used | why |", "|---|---|---|"]
+        release = os.getenv("RELEASE") or os.getenv("WANTED_RELEASE")
+        lines += [f"### Release `{release}`", "", "| component | used | why |", "|---|---|---|"]
         lines += [f"| {name} | `{value or '-'}` | {how} |" for name, value, how in rows] + [""]
 
     profile = [

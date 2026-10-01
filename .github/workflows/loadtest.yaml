@@ -40,11 +40,17 @@ on:
         description: Fail above this share of failed requests
         default: "0.01"
       p95_ceiling_ms:
-        description: Fail above this aggregate p95 in ms (empty = no ceiling)
+        description: Fail above this aggregate p95 in ms (0 = no ceiling)
         default: "4000"
 
 permissions:
   contents: read
+
+defaults:
+  run:
+    # Explicit bash adds pipefail, which GitHub's default shell lacks: a failing command piped
+    # into another must fail its step.
+    shell: bash
 
 concurrency:
   group: load-test
@@ -175,8 +181,9 @@ jobs:
         working-directory: dist
         run: |
           # --no-deps: without it compose runs the migrations service again first.
-          if ! docker compose run --rm --no-deps -T backend manage help seed_synthetic_health_data > /dev/null 2>&1; then
-            echo "::error::openimis-be:$BE_TAG has no seed_synthetic_health_data command; it ships in the claim module from release 26.10"
+          if ! docker compose run --rm --no-deps -T backend manage help seed_synthetic_health_data > ../seed-help.log 2>&1; then
+            tail -n 20 ../seed-help.log
+            echo "::error::openimis-be:$BE_TAG cannot run seed_synthetic_health_data (output above); the command ships in the claim module from release 26.10"
             exit 1
           fi
           docker compose run --rm --no-deps -T backend manage seed_synthetic_health_data --preset "$PRESET" --no-confirm \
@@ -203,11 +210,13 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Smoke, one user
-        # Any failed request fails this step: a broken endpoint is reported here, not as a slow one.
+        # Every scenario once, and any failed request fails this step: a broken endpoint is
+        # reported here, not as a slow one.
         env:
+          LOADTEST_SMOKE: "1"
           LOADTEST_FAIL_RATIO: "0"
-          LOADTEST_P95_MS: ""
-        run: locust --headless --host "$TARGET" -u 1 -r 1 -t 20s
+          LOADTEST_P95_MS: "0"
+        run: locust --headless --host "$TARGET" -u 1 -r 1 -t 2m
 
       - name: Load
         id: load
@@ -217,7 +226,7 @@ jobs:
 
       - name: Job summary
         if: always()
-        run: python .github/scripts/summary.py out >> "$GITHUB_STEP_SUMMARY"
+        run: python3 .github/scripts/summary.py out >> "$GITHUB_STEP_SUMMARY"
 
       - name: Stack logs
         if: failure()

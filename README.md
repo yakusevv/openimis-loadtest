@@ -9,7 +9,7 @@ once, and fail when too many requests fail or when responses get too slow.
 
 | Scenario | Requests | Share |
 |---|---|---|
-| claims of a health facility, 10, 20 or 50 per page | `claims` | 5 |
+| claims of the health facilities in one location, 10, 20 or 50 per page | `claims` | 5 |
 | eligibility check of an insuree | `insurees`, `policiesByInsuree`, `premiumsByPolicies` | 4 |
 | claim detail | `claim` | 3 |
 | current user | `GET /api/core/users/current_user/` | 1 |
@@ -27,8 +27,8 @@ tab, choose **Load test** and **Run workflow**.
 
 Each run starts a complete openIMIS stack from
 [openimis-dist_dkr](https://github.com/openimis/openimis-dist_dkr) with the demo dataset, adds
-synthetic data with the claim module's `seed_synthetic_health_data` command, checks every scenario
-with a single user, and then runs the load. A run takes about 20 minutes.
+synthetic data with the claim module's `seed_synthetic_health_data` command, runs every scenario
+once with a single user, and then runs the load. A run takes about 20 minutes.
 
 | Input | Default | Meaning |
 |---|---|---|
@@ -38,7 +38,7 @@ with a single user, and then runs the load. A run takes about 20 minutes.
 | `spawn_rate` | `2` | users started per second |
 | `run_time` | `5m` | how long the load lasts |
 | `fail_ratio` | `0.01` | highest share of failed requests that still passes |
-| `p95_ceiling_ms` | `4000` | highest 95th-percentile response time, in ms, that still passes |
+| `p95_ceiling_ms` | `4000` | highest 95th-percentile response time, in ms, that still passes; `0` switches the check off |
 | `be_tag`, `fe_tag`, `db_tag` | empty | use another backend, frontend or database image tag |
 | `dist_ref` | empty | use another branch or tag of openimis-dist_dkr |
 
@@ -61,7 +61,8 @@ A run fails when:
 
 - more than `fail_ratio` of the requests fail, counting HTTP errors and GraphQL errors;
 - the 95th-percentile response time over all requests exceeds `p95_ceiling_ms`;
-- a scenario fails at all in the single-user check;
+- any request fails in the single-user check, which runs every scenario once;
+- a simulated user cannot log in, or a scenario raises an error;
 - the stack does not start, or the data cannot be seeded.
 
 The runner is a shared GitHub-hosted machine that also runs the load generator, so compare runs
@@ -99,7 +100,8 @@ Environment variables read by `locustfile.py`:
 | `LOADTEST_USER`, `LOADTEST_PASSWORD` | `Admin`, `admin123` | account the simulated users log in with; it must see all health facilities |
 | `LOADTEST_API_ROOT` | `/api` | path of the openIMIS API |
 | `LOADTEST_FAIL_RATIO` | `0.01` | highest share of failed requests that still passes |
-| `LOADTEST_P95_MS` | not set | highest 95th-percentile response time, in ms; not checked when not set |
+| `LOADTEST_P95_MS` | not set | highest 95th-percentile response time, in ms; not checked when not set or `0` |
+| `LOADTEST_SMOKE` | not set | `1` runs every scenario once with each user, then stops the run |
 | `LOADTEST_SAMPLE_SIZE` | `200` | how many recent claims are read at the start to draw from |
 
 Locust exits with code 1 when the run fails and 0 when it passes.

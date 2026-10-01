@@ -5,7 +5,8 @@ import signal
 
 import gevent
 import requests
-from locust import HttpUser, between, events, task
+from locust import HttpUser, between, events
+from locust.exception import StopUser
 
 API_ROOT = os.getenv("LOADTEST_API_ROOT", "/api")
 USERNAME = os.getenv("LOADTEST_USER", "Admin")
@@ -13,6 +14,7 @@ PASSWORD = os.getenv("LOADTEST_PASSWORD", "admin123")
 FAIL_RATIO = float(os.getenv("LOADTEST_FAIL_RATIO", "0.01"))
 P95_MS = os.getenv("LOADTEST_P95_MS", "")
 SAMPLE_SIZE = int(os.getenv("LOADTEST_SAMPLE_SIZE", "200"))
+SMOKE = os.getenv("LOADTEST_SMOKE") == "1"
 
 logger = logging.getLogger(__name__)
 
@@ -130,8 +132,8 @@ def _facility_location(node):
 
 
 class Sample:
-    """Claims, insurees and health facilities read once per run from whatever the target
-    holds, so the scenarios carry no identifiers of a particular server."""
+    """Claims, their insurees and their health facilities' locations, read once per run from
+    whatever the target holds, so the scenarios carry no identifiers of a particular server."""
 
     claims = []
     chf_ids = []
@@ -189,10 +191,10 @@ def _thresholds(environment, **_):
     # Setting process_exit_code overrides Locust's own exit-on-error, so crashed tasks are counted here.
     crashes = sum(e["count"] for e in environment.runner.exceptions.values())
     if crashes:
-        reasons.append(f"{crashes} unhandled exceptions in tasks")
+        reasons.append(f"{crashes} errors in simulated users")
     if total.fail_ratio > FAIL_RATIO:
         reasons.append(f"fail ratio {total.fail_ratio:.2%} > {FAIL_RATIO:.2%}")
-    if P95_MS:
+    if P95_MS and float(P95_MS) > 0:
         p95 = total.get_response_time_percentile(0.95)
         if p95 > float(P95_MS):
             reasons.append(f"p95 {p95:.0f} ms > {float(P95_MS):.0f} ms")
@@ -206,7 +208,12 @@ class HealthFinancingUser(HttpUser):
 
     def on_start(self):
         self.client.headers["Content-Type"] = "application/json"
-        log_in(self.client, lambda body, name: self.client.post(f"{API_ROOT}/graphql", json=body, name=name))
+        try:
+            log_in(self.client, lambda body, name: self.client.post(f"{API_ROOT}/graphql", json=body, name=name))
+        except Exception as error:
+            # Locust drops a user whose on_start raises without recording it; report it so the run fails.
+            self.environment.events.user_error.fire(user_instance=self, exception=error, tb=error.__traceback__)
+            raise StopUser()
 
     def graphql(self, name, query, variables):
         with self.client.post(
@@ -228,21 +235,17 @@ class HealthFinancingUser(HttpUser):
                 return None
             return body.get("data")
 
-    @task(1)
     def current_user(self):
         self.client.get(f"{API_ROOT}/core/users/current_user/", name="current_user")
 
-    @task(5)
-    def claims_by_facility(self):
+    def claims_by_location(self):
         parent, location = random.choice(Sample.locations)
         first = random.choice((10, 20, 50))
         self.graphql(f"claims first:{first}", CLAIMS, {"parent": parent, "location": location, "first": first})
 
-    @task(3)
     def claim_detail(self):
         self.graphql("claim", CLAIM, {"uuid": random.choice(Sample.claims)})
 
-    @task(4)
     def eligibility(self):
         chf_id = random.choice(Sample.chf_ids)
         if self.graphql("insurees", INSUREE, {"chfId": chf_id}) is None:
@@ -254,6 +257,13 @@ class HealthFinancingUser(HttpUser):
         if uuids:
             self.graphql("premiumsByPolicies", PREMIUMS, {"policyUuids": uuids})
 
-    @task(1)
     def products(self):
         self.graphql("products", PRODUCTS, {"first": random.choice((10, 20))})
+
+    def every_scenario_once(self):
+        for scenario in self.SCENARIOS:
+            scenario(self)
+        self.environment.runner.quit()
+
+    SCENARIOS = {current_user: 1, claims_by_location: 5, claim_detail: 3, eligibility: 4, products: 1}
+    tasks = [every_scenario_once] if SMOKE else SCENARIOS
