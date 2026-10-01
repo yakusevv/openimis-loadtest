@@ -43,6 +43,56 @@ on:
         description: Fail above this aggregate p95 in ms (0 = no ceiling)
         default: "4000"
 
+  workflow_call:
+    # The same inputs, for openimis-dist_dkr and any other repository that runs the load test;
+    # the run then belongs to the caller. Defaults match the manual ones above.
+    inputs:
+      release:
+        type: string
+        default: develop
+      be_tag:
+        type: string
+        default: ""
+      fe_tag:
+        type: string
+        default: ""
+      db_tag:
+        type: string
+        default: ""
+      dist_repository:
+        description: Repository providing the stack
+        type: string
+        default: openimis/openimis-dist_dkr
+      dist_ref:
+        type: string
+        default: ""
+      preset:
+        type: string
+        default: medium
+      users:
+        type: string
+        default: "20"
+      spawn_rate:
+        type: string
+        default: "2"
+      run_time:
+        type: string
+        default: 5m
+      fail_ratio:
+        type: string
+        default: "0.01"
+      p95_ceiling_ms:
+        type: string
+        default: "4000"
+      loadtest_repository:
+        description: Repository holding this workflow; a caller's own checkout would be the caller
+        type: string
+        default: openimis/openimis-loadtest
+      loadtest_ref:
+        description: Ref of loadtest_repository; name the same ref as the caller's uses line
+        type: string
+        default: main
+
 permissions:
   contents: read
 
@@ -86,6 +136,7 @@ jobs:
       OVERRIDE_FE_TAG: ${{ inputs.fe_tag }}
       OVERRIDE_DB_TAG: ${{ inputs.db_tag }}
       OVERRIDE_DIST_REF: ${{ inputs.dist_ref }}
+      DIST_REPOSITORY: ${{ inputs.dist_repository || 'openimis/openimis-dist_dkr' }}
       PRESET: ${{ inputs.preset || 'medium' }}
       USERS: ${{ inputs.users || '20' }}
       SPAWN_RATE: ${{ inputs.spawn_rate || '2' }}
@@ -97,6 +148,10 @@ jobs:
     steps:
       - name: Check out the load test
         uses: actions/checkout@v4
+        with:
+          # Called from another repository, the default checkout would be that repository.
+          repository: ${{ inputs.loadtest_repository || github.repository }}
+          ref: ${{ inputs.loadtest_ref || github.sha }}
 
       - name: Resolve the release
         # Each component follows the release where upstream publishes it and falls back to
@@ -114,7 +169,7 @@ jobs:
             echo "$value"
           }
           image() { docker manifest inspect "ghcr.io/openimis/$IMAGE:$1" > /dev/null 2>&1; }
-          branch() { git ls-remote --exit-code --heads https://github.com/openimis/openimis-dist_dkr.git "$1" > /dev/null; }
+          branch() { git ls-remote --exit-code --heads "https://github.com/$DIST_REPOSITORY.git" "$1" > /dev/null; }
           RELEASE=$WANTED_RELEASE
           if [ "$RELEASE" = release-branch ]; then
             RELEASE=""
@@ -136,6 +191,9 @@ jobs:
             echo "DB_TAG=$(IMAGE=openimis-pgsql pick 'database image' "$OVERRIDE_DB_TAG" "$RELEASE" image develop)"
             echo "DIST_REF=$(pick 'openimis-dist_dkr ref' "$OVERRIDE_DIST_REF" "$dist" branch develop)"
           } >> "$GITHUB_ENV"
+          if [ "$DIST_REPOSITORY" != openimis/openimis-dist_dkr ]; then
+            printf 'stack repository\t%s\t%s\n' "$DIST_REPOSITORY" "override" >> out/resolution.tsv
+          fi
           column -t -s "$(printf '\t')" out/resolution.tsv
           if grep -q -P "^(backend|frontend) image\t\t" out/resolution.tsv; then
             echo "::error::release $RELEASE has no published backend or frontend image"
@@ -145,7 +203,7 @@ jobs:
       - name: Check out the stack
         uses: actions/checkout@v4
         with:
-          repository: openimis/openimis-dist_dkr
+          repository: ${{ env.DIST_REPOSITORY }}
           ref: ${{ env.DIST_REF }}
           path: dist
 

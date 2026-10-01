@@ -50,6 +50,31 @@ with that tag, and the `release/<release>` branch of openimis-dist_dkr. When the
 the branch does not exist for that release, the run uses `develop` for it instead. The backend
 image must include `seed_synthetic_health_data`, which the claim module ships from release 26.10.
 
+### Calling it from another repository
+
+Another workflow can run the same load test as a job of its own, and the run then shows up in that
+repository. openimis-dist_dkr does this for the nightly run:
+
+```yaml
+jobs:
+  load-test:
+    uses: openimis/openimis-loadtest/.github/workflows/loadtest.yaml@main
+    with:
+      release: develop
+      dist_ref: ${{ github.ref_name }}
+```
+
+It takes the inputs listed above, plus three that only a caller needs:
+
+| Input | Default | Meaning |
+|---|---|---|
+| `dist_repository` | `openimis/openimis-dist_dkr` | repository providing the stack, for example a fork |
+| `loadtest_repository` | `openimis/openimis-loadtest` | repository holding this workflow |
+| `loadtest_ref` | `main` | branch or tag of `loadtest_repository`; name the same ref as after the `@` in `uses` |
+
+The last two exist because a called workflow cannot see its own repository: GitHub gives it the
+caller's, so it checks out its locustfile from what these inputs name.
+
 ### Reading the result
 
 The run's summary page shows which images and branch were used, the size of the dataset, and the
